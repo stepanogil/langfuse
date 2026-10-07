@@ -24,7 +24,10 @@ import {
 } from "@/src/features/ai-gateway/server/availability";
 import { env } from "@/src/env.mjs";
 import { createProjectMembershipsOnSignup } from "@/src/features/auth/lib/createProjectMembershipsOnSignup";
-import { getSessionLoginAt } from "@/src/features/auth/lib/sessionExpiration";
+import {
+  advanceSessionsExpiredAtForEmail,
+  getSessionLoginAt,
+} from "@/src/features/auth/lib/sessionExpiration";
 import {
   captureSignupStep,
   sendSignupWebhook,
@@ -1317,6 +1320,16 @@ export async function getAuthOptions(
       pkceCodeVerifier: {
         name: getCookieName("next-auth.pkce.code_verifier"),
         options: getCookieOptions(),
+      },
+    },
+    events: {
+      // JWT sessions are stateless: clearing the cookie alone leaves a copied
+      // token valid until it expires. Advancing the revocation boundary makes
+      // the `session` callback reject every token issued before sign-out.
+      // NextAuth logs errors thrown here and still clears the cookie.
+      signOut: async (message) => {
+        const email = "token" in message ? message.token?.email : undefined;
+        if (email) await advanceSessionsExpiredAtForEmail(email);
       },
     },
   };
