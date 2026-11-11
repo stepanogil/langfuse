@@ -1,0 +1,60 @@
+diff --git a/web/src/__tests__/server/unit/getServerAuthSession-session-revocation.servertest.ts b/web/src/__tests__/server/unit/getServerAuthSession-session-revocation.servertest.ts
+index ea450b903e..25254da4fb 100644
+--- a/web/src/__tests__/server/unit/getServerAuthSession-session-revocation.servertest.ts
++++ b/web/src/__tests__/server/unit/getServerAuthSession-session-revocation.servertest.ts
+@@ -120,6 +120,24 @@ describe("NextAuth JWT session revocation", () => {
+     expect(mockQueryRaw).toHaveBeenCalledTimes(1);
+   });
+ 
++  it("revokes the user's sessions server-side on sign-out", async () => {
++    const signOut = (await getAuthOptions()).events?.signOut;
++    if (!signOut) throw new Error("Expected signOut event");
++    mockQueryRaw.mockResolvedValueOnce([
++      { sessionsExpiredAt: new Date("2026-09-09T12:30:00.000Z") },
++    ]);
++
++    await signOut({ token: { email: "USER@example.com" } } as {
++      session: Session;
++      token: JWT;
++    });
++
++    expect(mockQueryRaw).toHaveBeenCalledTimes(1);
++    const [query, email] = mockQueryRaw.mock.calls[0];
++    expect((query as string[]).join("")).toContain('SET "sessions_expired_at"');
++    expect(email).toBe("user@example.com");
++  });
++
+   it.each([
+     {
+       name: "denies a token issued before the revocation timestamp",
+diff --git a/web/src/server/auth.ts b/web/src/server/auth.ts
+index 8a686491a9..3cee289718 100644
+--- a/web/src/server/auth.ts
++++ b/web/src/server/auth.ts
+@@ -20,7 +20,10 @@ import {
+ import { isGatewayEnabledForOrganization } from "@/src/features/ai-gateway/server/availability";
+ import { env } from "@/src/env.mjs";
+ import { createProjectMembershipsOnSignup } from "@/src/features/auth/lib/createProjectMembershipsOnSignup";
+-import { getSessionLoginAt } from "@/src/features/auth/lib/sessionExpiration";
++import {
++  advanceSessionsExpiredAtForEmail,
++  getSessionLoginAt,
++} from "@/src/features/auth/lib/sessionExpiration";
+ import { type AdClickIds } from "@/src/features/auth/lib/signupAttribution";
+ import {
+   type AdapterUser,
+@@ -1235,6 +1238,14 @@ export async function getAuthOptions(
+           });
+         }
+       },
++      // JWT sessions are stateless: clearing the cookie alone leaves a copied
++      // token valid until it expires. Advancing the revocation boundary makes
++      // the `session` callback reject every token issued before sign-out.
++      // NextAuth logs errors thrown here and still clears the cookie.
++      signOut: async (message) => {
++        const email = "token" in message ? message.token?.email : undefined;
++        if (email) await advanceSessionsExpiredAtForEmail(email);
++      },
+     },
+   };
+   return data;
