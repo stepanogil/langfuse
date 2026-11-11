@@ -4,7 +4,7 @@
 > for our Langfuse fork. It produces a patched release branch. Deploying that
 > branch to the Azure VM is covered in a separate runbook,
 > `docs/deploy-patched-web-image.md`. Before each step that writes to a remote
-> (`git push`, `gh repo sync`, pushing an image), show the command and wait for
+> (`git push`, `gh pr close`, pushing an image), show the command and wait for
 > the operator to confirm. Local steps and read-only steps can run without
 > asking. If a cherry-pick conflicts in a way section 5 doesn't cover, stop and
 > explain it. Don't guess.
@@ -28,9 +28,13 @@
 
 | Branch | Contents | Purpose | Who changes it |
 |---|---|---|---|
-| `main` (fork) | Mirror of upstream `main` | Base for the upstream PR | Only `gh repo sync`; never commit to it |
-| `fix/revoke-jwt-session-on-sign-out` | The fix on top of upstream `main` | Upstream pull request | Rebase onto `main` when needed |
-| `release/vX.Y.Z-patched` | Tag `vX.Y.Z` plus the fix (one commit) | What gets built and deployed | Created once per release, never rebased |
+| `fix/revoke-jwt-session-on-sign-out` | The fix plus these runbooks and `docs/fix-v4.60.0.patch` | Home branch of the fork: the reference copy of the fix and the docs | Commit doc updates here |
+| `release/vX.Y.Z-patched` | Tag `vX.Y.Z` plus the fix (one commit, no docs) | What gets built and deployed | Created once per release, never rebased |
+| `main` (fork) | Whatever GitHub's fork copy holds | Not used by this workflow | Leave it alone |
+
+We maintain the fork long term. The fix won't be upstreamed. Upstream PR #19242
+was opened from the home branch and has been abandoned; close it before pushing
+the home branch again (section 4), or every push will show up there.
 
 Rules:
 - **Every `release/*-patched` branch is exactly one commit ahead of its tag.**
@@ -42,7 +46,8 @@ Rules:
   "Sync fork" button on a patched branch. Either would mix unreleased upstream
   code into the build.
 - To change the fix itself: amend the commit on the newest patched branch so it
-  stays one commit. Make the same change on the `fix/...` branch.
+  stays one commit. Make the same change on the home branch so it stays the
+  reference copy.
 
 ## 3. Prerequisites (workstation)
 
@@ -61,9 +66,9 @@ Run this once. After that, section 5 is the routine.
 git fetch origin --tags
 git branch -r | grep release/ || true     # does the fork already have patched branches?
 git checkout -b release/v4.60.0-patched v4.60.0
-# The patch lives on the docs/fork-deploy-runbooks branch, so it's not in the
-# working tree after checking out the tag. Read it from git instead.
-git show docs/fork-deploy-runbooks:docs/fix-v4.60.0.patch > /tmp/fix-v4.60.0.patch
+# The patch lives on the home branch, so it's not in the working tree after
+# checking out the tag. Read it from git instead.
+git show fix/revoke-jwt-session-on-sign-out:docs/fix-v4.60.0.patch > /tmp/fix-v4.60.0.patch
 git apply --check /tmp/fix-v4.60.0.patch && git apply /tmp/fix-v4.60.0.patch
 # The same diff is in docs/deploy-patched-web-image.md section 8.
 git add web/src/server/auth.ts web/src/__tests__/server/unit/getServerAuthSession-session-revocation.servertest.ts
@@ -71,8 +76,17 @@ git commit -m "fix(auth): revoke JWT sessions server-side on sign-out"
 ```
 
 Then verify it (section 6) and push it:
-`git push -u fork release/v4.60.0-patched`. Also push the fix branch, which
-isn't on the fork yet: `git push -u fork fix/revoke-jwt-session-on-sign-out`.
+`git push -u fork release/v4.60.0-patched`.
+
+The home branch on the fork (`fork/fix/revoke-jwt-session-on-sign-out`) still
+holds an older copy of the fix, on upstream `main` from 2026-10-07, and is the
+head of upstream PR #19242. To replace it with the local home branch:
+1. Close the PR first:
+   `gh pr close 19242 -R langfuse/langfuse --comment "Not pursuing this upstream."`
+2. Then overwrite the fork's branch:
+   `git push --force-with-lease fork fix/revoke-jwt-session-on-sign-out`.
+
+Both steps are public or overwrite history, so ask the operator before each.
 
 ## 5. Per-release workflow
 
@@ -181,15 +195,13 @@ Ask before running each of these:
 
 ```bash
 git push -u fork "release/${NEW}-patched"
-gh repo sync stepanogil/langfuse --branch main        # keep the fork's main mirrored
 ```
 
-Optionally, refresh the upstream PR branch so it stays mergeable:
-```bash
-git switch fix/revoke-jwt-session-on-sign-out
-git fetch origin && git rebase origin/main            # same conflict rules as 5.2
-git push --force-with-lease fork fix/revoke-jwt-session-on-sign-out
-```
+If the fix itself changed during this upgrade (for example after resolving a
+conflict differently), record the new version on the home branch: switch to
+`fix/revoke-jwt-session-on-sign-out`, update section 5.2 and, if useful, add a
+`docs/fix-${NEW}.patch` made with `git format-patch -1 --stdout "release/${NEW}-patched"`.
+Then commit and push.
 
 Hand-off to the deploy step. Give the operator:
 - the branch name `release/${NEW}-patched`
@@ -204,11 +216,13 @@ On the VM, follow `docs/deploy-patched-web-image.md`:
 5. Run `docker compose pull langfuse-worker langfuse-ai-gateway && docker compose up -d`.
 6. Verify.
 
-## 8. Exit plan: retire the fork
+## 8. When the fork is no longer needed
 
-The fork exists only until upstream has the fix. Open a PR from
-`fix/revoke-jwt-session-on-sign-out` against `langfuse/langfuse:main` (follow the
-repo's `CONTRIBUTING.md`). When a release includes the fix:
+We aren't upstreaming the fix, but upstream may fix the same problem on its own
+(section 5.2 checks for this on every upgrade). If a release revokes sessions on
+sign-out without our patch, confirm it with the cookie replay test in
+`docs/deploy-patched-web-image.md` Phase 6, run against the official image.
+Then:
 1. On the VM, delete `docker-compose.override.yml`.
 2. Run `docker compose up -d --pull always` (back on the official images).
 3. Stop creating patched branches. Keep the old ones for the record, or delete

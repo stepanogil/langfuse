@@ -32,8 +32,10 @@ run the fix, we have to **build our own web image and point compose at it**.
 ### The fix we're deploying
 - Fork: `git@github.com:stepanogil/langfuse.git` (HTTPS: `https://github.com/stepanogil/langfuse.git`)
 - Original commit: `c7c201ea1577cfd9028ed8c2954ccbffc801f0f7`, on branch
-  `fix/revoke-jwt-session-on-sign-out`. It sits on top of upstream `main`, not on
-  a release tag, and **as of writing it has not been pushed to the fork**.
+  `fix/revoke-jwt-session-on-sign-out`, the fork's home branch, which also holds
+  these runbooks. It sits on top of upstream `main`, not on a release tag. The
+  fork's copy of that branch is older and differs from the local one. We
+  maintain the fork long term; the fix won't be upstreamed.
 - Problem: Langfuse uses NextAuth JWT sessions. Signing out only deleted the
   session cookie, so a copied cookie kept working until it expired (14 days by
   default). That's the high finding from our VAPT.
@@ -90,7 +92,7 @@ Write down the **running version** from the health endpoint. That sets
 `TARGET_TAG`:
 - If the running version is `4.60.0` or older, use `TARGET_TAG=v4.60.0`. The
   ready-made patch in section 8 applies cleanly to it. The same patch is also
-  committed as `docs/fix-v4.60.0.patch` on the `docs/fork-deploy-runbooks` branch; copy it over
+  committed as `docs/fix-v4.60.0.patch` on the `fix/revoke-jwt-session-on-sign-out` branch; copy it over
   with `scp` instead of pasting.
 - How to create patched branches for later releases is covered in
   `docs/upgrade-fork-from-upstream.md`.
@@ -345,7 +347,8 @@ web image is ours. For each upstream release `vX.Y.Z`:
 
 Never bump the worker or ai-gateway tag without rebuilding web at the same tag.
 
-**Exit plan:** the fix is a candidate for an upstream pull request to
-`langfuse/langfuse`. Once it's merged and released, delete
-`docker-compose.override.yml` and go back to plain
+This is the permanent routine: we maintain the fork and don't upstream the fix.
+The full workstation side is in `docs/upgrade-fork-from-upstream.md`. If an
+upstream release ever fixes sign-out revocation on its own, verify it with the
+Phase 6 test, then delete `docker-compose.override.yml` and go back to plain
 `docker compose up -d --pull always`.
