@@ -1,145 +1,140 @@
 # Upgrading the fork from upstream
 
 > **For the Claude Code agent reading this:** this is the maintenance runbook
-> for our Langfuse fork. It produces a patched release branch. Deploying that
-> branch to the Azure VM is covered in a separate runbook,
+> for our Langfuse fork. It produces a patched release branch and a patched web
+> image. Deploying that image to the Azure VM is covered in a separate runbook,
 > `docs/deploy-patched-web-image.md`. Before each step that writes to a remote
-> (`git push`, `gh pr close`, pushing an image), show the command and wait for
-> the operator to confirm. Local steps and read-only steps can run without
-> asking. If a cherry-pick conflicts in a way section 5 doesn't cover, stop and
-> explain it. Don't guess.
+> (`git push`, running the build workflow), show the command and wait for the
+> operator to confirm. Local steps and read-only steps can run without asking.
+> If a cherry-pick conflicts in a way section 5 doesn't cover, stop and explain
+> it. Don't guess.
 
 ## 1. Context
 
 - **Upstream:** `https://github.com/langfuse/langfuse.git` (the git remote `origin`)
-- **Fork:** `git@github.com:stepanogil/langfuse.git` (the git remote `fork`)
+- **Fork:** `https://github.com/stepanogil/langfuse.git` (the git remote `fork`).
+  Use HTTPS. The SSH URL (`git@github.com:...`) has hung on the workstation,
+  while `gh` is set up for HTTPS. To switch:
+  `git remote set-url fork https://github.com/stepanogil/langfuse.git`.
+- **Build pipeline:** `https://github.com/stepanogil/langfuse-web-build`, a
+  private repo with one workflow, `build-web.yml`. It lives outside the fork on
+  purpose: the fork carries ~40 upstream workflows, most of which would run on
+  every push if Actions were active there. **Keep the fork's Actions unused.**
+  Don't add workflows to the fork.
+- **Image:** `ghcr.io/stepanogil/langfuse-web:X.Y.Z-patched` (private,
+  `linux/amd64`).
 - **What the fork adds:** exactly one commit, `fix(auth): revoke JWT sessions server-side on sign-out`.
   It adds a NextAuth `events.signOut` handler in `web/src/server/auth.ts` that
   calls `advanceSessionsExpiredAtForEmail(email)`, plus one unit test in
   `web/src/__tests__/server/unit/getServerAuthSession-session-revocation.servertest.ts`.
   It closes a VAPT finding: before the fix, a copied session cookie kept working
   after sign-out.
-- **How it's deployed:** the VM runs the official worker and ai-gateway images,
-  plus a web image we build ourselves. All three must be on the **same version**.
-  That rule is why every deployed build has to be "official release tag + the
-  fix", not "upstream `main` + the fix".
+- **Why releases, not `main`:** the VM runs the official worker and ai-gateway
+  images next to our web image, and all three must be on the **same version**.
+  So every build is "official release tag + the fix", never "upstream `main` +
+  the fix".
+- **We maintain the fork long term.** The fix won't be upstreamed. The upstream
+  PR (#19242) is closed.
 
 ## 2. Branch model
 
 | Branch | Contents | Purpose | Who changes it |
 |---|---|---|---|
-| `fix/revoke-jwt-session-on-sign-out` | The fix plus these runbooks and `docs/fix-v4.60.0.patch` | Home branch of the fork: the reference copy of the fix and the docs | Commit doc updates here |
+| `fix/revoke-jwt-session-on-sign-out` | The fix on upstream `main`, plus these runbooks | Home branch of the fork: the docs and a reference copy of the fix | Commit doc updates here |
 | `release/vX.Y.Z-patched` | Tag `vX.Y.Z` plus the fix (one commit, no docs) | What gets built and deployed | Created once per release, never rebased |
 | `main` (fork) | Whatever GitHub's fork copy holds | Not used by this workflow | Leave it alone |
 
-We maintain the fork long term. The fix won't be upstreamed. Upstream PR #19242
-was opened from the home branch and has been abandoned; close it before pushing
-the home branch again (section 4), or every push will show up there.
+### Current state
+
+| Release branch | Fix commit | Image | Deployed |
+|---|---|---|---|
+| `release/v4.78.0-patched` | `3fddac6048` | `ghcr.io/stepanogil/langfuse-web:4.78.0-patched` (`sha256:05acc94c…`) | Not yet, as of 2026-11-11 |
+
+Update this table whenever you add a release or deploy one.
 
 Rules:
 - **Every `release/*-patched` branch is exactly one commit ahead of its tag.**
   Check with `git rev-list --count vX.Y.Z..release/vX.Y.Z-patched`, which should
-  print `1`.
-- **Keep old patched branches.** They record what was deployed and are the
-  rollback source.
+  print `1`. The build workflow refuses to build anything else.
+- **The fix to cherry-pick is the tip of the newest patched branch.** It's the
+  most recently conflict-resolved copy.
+- **Keep old patched branches.** They record what was deployed.
 - **Don't merge upstream `main` into a patched branch**, and don't use GitHub's
-  "Sync fork" button on a patched branch. Either would mix unreleased upstream
-  code into the build.
+  "Sync fork" button on one. Either would mix unreleased upstream code into the
+  build.
 - To change the fix itself: amend the commit on the newest patched branch so it
-  stays one commit. Make the same change on the home branch so it stays the
-  reference copy.
+  stays one commit, and make the same change on the home branch.
 
 ## 3. Prerequisites (workstation)
 
 - Git, Node 22 (`node -v`), and **pnpm**. If pnpm is missing, run
-  `corepack enable`. pnpm was missing when this doc was written.
-- `gh` CLI logged in with push access to the fork (`gh auth status`).
-- Docker, if you want a local build check (optional, needs 8 GB+ of free RAM).
-- Working directory: the local clone with both remotes.
-  `git remote -v` should list `origin` (upstream) and `fork`.
+  `corepack enable`.
+- `gh` CLI logged in with push access to the fork and to `langfuse-web-build`
+  (`gh auth status`). To also inspect the GHCR package from the workstation,
+  add the scope with `gh auth refresh -s read:packages`.
+- Working directory: the local clone, with remotes `origin` (upstream) and
+  `fork` (`git remote -v`).
 
-## 4. One-time setup (if `release/v4.60.0-patched` doesn't exist yet)
+## 4. Per-release workflow
 
-Run this once. After that, section 5 is the routine.
-
+### 4.1 Pick the release
 ```bash
 git fetch origin --tags
-git branch -r | grep release/ || true     # does the fork already have patched branches?
-git checkout -b release/v4.60.0-patched v4.60.0
-# The patch lives on the home branch, so it's not in the working tree after
-# checking out the tag. Read it from git instead.
-git show fix/revoke-jwt-session-on-sign-out:docs/fix-v4.60.0.patch > /tmp/fix-v4.60.0.patch
-git apply --check /tmp/fix-v4.60.0.patch && git apply /tmp/fix-v4.60.0.patch
-# The same diff is in docs/deploy-patched-web-image.md section 8.
-git add web/src/server/auth.ts web/src/__tests__/server/unit/getServerAuthSession-session-revocation.servertest.ts
-git commit -m "fix(auth): revoke JWT sessions server-side on sign-out"
-```
-
-Then verify it (section 6) and push it:
-`git push -u fork release/v4.60.0-patched`.
-
-The home branch on the fork (`fork/fix/revoke-jwt-session-on-sign-out`) still
-holds an older copy of the fix, on upstream `main` from 2026-10-07, and is the
-head of upstream PR #19242. To replace it with the local home branch:
-1. Close the PR first:
-   `gh pr close 19242 -R langfuse/langfuse --comment "Not pursuing this upstream."`
-2. Then overwrite the fork's branch:
-   `git push --force-with-lease fork fix/revoke-jwt-session-on-sign-out`.
-
-Both steps are public or overwrite history, so ask the operator before each.
-
-## 5. Per-release workflow
-
-### 5.1 Pick the release
-```bash
-git fetch origin --tags
-git tag --sort=-creatordate | grep -E '^v4\.[0-9]+\.[0-9]+$' | head -5
-git branch -a --list '*release/*-patched' --sort=-creatordate | head -3
+git tag --sort=-v:refname | grep -E '^v4\.[0-9]+\.[0-9]+$' | head -5
+git ls-remote --heads https://github.com/stepanogil/langfuse.git 'release/*-patched'
 ```
 
 Set the variables:
 ```bash
-NEW=v4.61.0                       # the upstream release to move to
-PREV=release/v4.60.0-patched      # the newest existing patched branch
+NEW=v4.79.0                       # the upstream release to move to
+PREV=release/v4.78.0-patched      # the newest existing patched branch
+git fetch https://github.com/stepanogil/langfuse.git "$PREV:$PREV"   # if it isn't local
 FIX=$(git rev-parse "$PREV")      # the fix commit is the tip of PREV
 git log -1 --oneline "$FIX"       # should print the fix(auth) commit
 ```
 
-You can skip releases; going straight from v4.60.0 to v4.64.2 is fine. Just
-never pick a release older than what the VM runs now, because database
-migrations only move forward.
+You can skip releases; going straight from 4.78.0 to 4.83.1 is fine. Never
+pick a release older than what the VM runs, because database migrations only
+move forward.
 
-Read the upstream release notes for anything between the deployed version and
-`NEW`, especially breaking changes, required env vars, and infra changes:
-`gh release view "$NEW" -R langfuse/langfuse`. Check `docker-compose.yml`
-changes as well:
-`git diff "${PREV#release/}" "$NEW" -- docker-compose.yml`. If that diff isn't
-empty, the VM clone needs a `git pull` too, and the override file in the deploy
-runbook may need updating.
+Read the upstream release notes between the deployed version and `NEW` for
+breaking changes, required env vars, and infra changes:
+`gh release view "$NEW" -R langfuse/langfuse`. Check `docker-compose.yml` too:
 
-### 5.2 Create the branch and re-apply the fix
+```bash
+PREV_TAG=$(git rev-parse --abbrev-ref "$PREV" | sed -E 's|.*release/(v[0-9.]+)-patched|\1|')   # e.g. v4.78.0
+git diff "$PREV_TAG" "$NEW" -- docker-compose.yml
+```
+
+If the diff isn't empty, tell the operator: the VM's clone needs updating in
+that deploy (deploy runbook, Phase 1).
+
+### 4.2 Create the branch and re-apply the fix
 ```bash
 git switch -c "release/${NEW}-patched" "$NEW"
 git cherry-pick "$FIX"
 ```
 
-- **Clean:** go to 5.3.
+- **Clean:** go to 4.3.
 - **Conflict** (usually in `web/src/server/auth.ts`, which changes often
   upstream):
   1. For every conflict hunk, take **upstream's side** (`HEAD`) as the base.
   2. Re-add only the fix's two edits:
      - Add `advanceSessionsExpiredAtForEmail` to the import from
        `@/src/features/auth/lib/sessionExpiration`.
-     - Inside the `events: { ... }` object that `getAuthOptions()` returns, keep
-       everything upstream has (for example `createUser`) and add:
+     - In the object `getAuthOptions()` returns, add a `signOut` entry to the
+       `events: { ... }` block (create the block if upstream has none; keep
+       anything already in it):
        ```ts
-       // JWT sessions are stateless: clearing the cookie alone leaves a copied
-       // token valid until it expires. Advancing the revocation boundary makes
-       // the `session` callback reject every token issued before sign-out.
-       // NextAuth logs errors thrown here and still clears the cookie.
-       signOut: async (message) => {
-         const email = "token" in message ? message.token?.email : undefined;
-         if (email) await advanceSessionsExpiredAtForEmail(email);
+       events: {
+         // JWT sessions are stateless: clearing the cookie alone leaves a copied
+         // token valid until it expires. Advancing the revocation boundary makes
+         // the `session` callback reject every token issued before sign-out.
+         // NextAuth logs errors thrown here and still clears the cookie.
+         signOut: async (message) => {
+           const email = "token" in message ? message.token?.email : undefined;
+           if (email) await advanceSessionsExpiredAtForEmail(email);
+         },
        },
        ```
        If upstream has added its own `signOut` event, combine the two into one
@@ -157,104 +152,119 @@ git cherry-pick "$FIX"
   (`grep -n "sessionsExpiredAt\|getSessionLoginAt" web/src/server/auth.ts`).
 - Upstream now revokes sessions on sign-out itself. Look for a `signOut` event
   or a release note about it. In that case **the fork may no longer be needed**
-  (see section 8).
+  (see section 7).
 
-### 5.3 Check the shape of the branch
+### 4.3 Check the shape of the branch
 ```bash
 git rev-list --count "$NEW..HEAD"         # should be 1
 git diff --stat "$NEW" HEAD               # only auth.ts and the test file
 ```
 
-## 6. Verify
+## 5. Verify
 
 ```bash
 pnpm install --frozen-lockfile
 pnpm --filter=shared run db:generate && pnpm --filter=shared run build
 pnpm --filter web run test getServerAuthSession-session-revocation
-pnpm --filter web run typecheck
-pnpm --filter web run lint
 ```
 
-What a pass looks like:
-- The vitest summary shows all tests passing (`Tests  N passed (N)`), including
-  `revokes the user's sessions server-side on sign-out`.
-- typecheck and lint exit with no errors. Lint fails on even one warning
-  (`--max-warnings 0`).
+A pass prints `Tests  N passed (N)`, including
+`revokes the user's sessions server-side on sign-out`. For 4.78.0 that was
+`Tests  7 passed (7)`.
 
-Then confirm the test actually catches a regression. Temporarily comment out the
-`signOut` handler, re-run the test, see it fail, and restore the handler with
-`git checkout -- web/src/server/auth.ts`.
-
-Optional full build check (heavy):
-`docker build -f web/Dockerfile -t "langfuse-web-patched:${NEW#v}" .` from the
-repo root.
-
-## 7. Publish
-
-Ask before running each of these:
+Then confirm the test actually catches a regression. Put back upstream's
+`auth.ts`, re-run, see exactly that test fail, and restore the file:
 
 ```bash
-git push -u fork "release/${NEW}-patched"
+git show "$NEW":web/src/server/auth.ts > web/src/server/auth.ts
+pnpm --filter web run test getServerAuthSession-session-revocation   # expect: 1 failed
+git checkout -- web/src/server/auth.ts
 ```
 
-If the fix itself changed during this upgrade (for example after resolving a
-conflict differently), record the new version on the home branch: switch to
-`fix/revoke-jwt-session-on-sign-out`, update section 5.2 and, if useful, add a
-`docs/fix-${NEW}.patch` made with `git format-patch -1 --stdout "release/${NEW}-patched"`.
-Then commit and push.
+Optional and memory-heavy: `pnpm --filter web run typecheck` and
+`pnpm exec turbo run lint --filter=web --force`. On the WSL workstation the
+type-aware linter was killed for lack of memory (`SIGKILL` from `tsgolint`),
+which is a host limit, not a lint failure. The image build in section 6
+compiles the app either way. It isn't a full typecheck, but it catches broken
+imports and syntax.
 
-Hand-off to the deploy step. Give the operator:
-- the branch name `release/${NEW}-patched`
-- the version `${NEW#v}` to pin in `docker-compose.override.yml`
-- whether `docker-compose.yml` changed upstream (from 5.1)
+## 6. Publish and build
 
-On the VM, follow `docs/deploy-patched-web-image.md`:
-1. Check out the branch.
-2. Build `langfuse-web-patched:${NEW#v}`.
-3. Back up Postgres.
-4. Change all three image tags in the override file.
-5. Run `docker compose pull langfuse-worker langfuse-ai-gateway && docker compose up -d`.
-6. Verify.
+Ask before each of these.
 
-## 8. When the fork is no longer needed
+1. **Push the branch to the fork:**
+   ```bash
+   git push -u fork "release/${NEW}-patched"
+   ```
+   The fork's Actions don't fire on this push. That's expected.
+
+2. **Build the image** (takes about 30–35 minutes; the build cache helps on
+   later runs):
+   ```bash
+   gh workflow run build-web.yml -R stepanogil/langfuse-web-build -f version="${NEW#v}"
+   sleep 10; RUN=$(gh run list -R stepanogil/langfuse-web-build --limit 1 --json databaseId -q '.[0].databaseId')
+   gh run watch "$RUN" -R stepanogil/langfuse-web-build --exit-status
+   ```
+   The workflow checks out `release/v<version>-patched` from the fork, fails
+   unless that branch is exactly one commit on top of upstream `v<version>`,
+   builds `web/Dockerfile` for `linux/amd64`, and pushes:
+   - `ghcr.io/stepanogil/langfuse-web:<version>-patched`
+   - `ghcr.io/stepanogil/langfuse-web:<version>-patched-<short sha>`
+
+   A different branch can be passed with `-f ref=<branch>`.
+
+3. **Get the digest for the hand-off:**
+   ```bash
+   gh run view "$RUN" -R stepanogil/langfuse-web-build --log \
+     | grep -o 'langfuse-web:[^ ]*-patched@sha256:[0-9a-f]*' | sort -u
+   ```
+
+4. **Record it on the home branch:** switch to
+   `fix/revoke-jwt-session-on-sign-out` and add the new row to "Current state"
+   (section 2) here and to "Images available right now" in
+   `docs/deploy-patched-web-image.md`. If the fix itself changed, update
+   section 4.2. Then commit and `git push fork fix/revoke-jwt-session-on-sign-out`.
+
+**Hand-off to the operator for the VM:** the version `${NEW#v}`, the image tag
+and digest, and whether `docker-compose.yml` changed upstream (4.1). On the VM
+they follow `docs/deploy-patched-web-image.md`: check the version, back up,
+change the three tags in the override file, pull, `up -d`, verify.
+
+### If the build fails
+- `No space left on device`: the runner's disk is too small for the build. The
+  workflow's "Free disk space" step removes unused preinstalled tools; it may
+  need more paths added if GitHub changes the runner image.
+- Killed during `next build`, or exit code 137: the runner ran out of memory.
+  The workflow adds swap. If that isn't enough, use a larger runner or the
+  VM-build fallback (deploy runbook, section 9).
+- "HEAD^ is not upstream vX.Y.Z": the branch isn't exactly tag + one commit. Go
+  back to 4.3.
+- The `Legacy…` and `RedundantTargetPlatform` annotations come from upstream's
+  Dockerfile. They're only warnings.
+
+## 7. When the fork is no longer needed
 
 We aren't upstreaming the fix, but upstream may fix the same problem on its own
-(section 5.2 checks for this on every upgrade). If a release revokes sessions on
+(section 4.2 checks for this on every upgrade). If a release revokes sessions on
 sign-out without our patch, confirm it with the cookie replay test in
-`docs/deploy-patched-web-image.md` Phase 6, run against the official image.
+`docs/deploy-patched-web-image.md` Phase 5, run against the official image.
 Then:
 1. On the VM, delete `docker-compose.override.yml`.
 2. Run `docker compose up -d --pull always` (back on the official images).
-3. Stop creating patched branches. Keep the old ones for the record, or delete
-   them.
+3. Stop creating patched branches. The build repo and the GHCR package can be
+   archived or deleted.
 
-## 9. Optional: automate with GitHub Actions
-
-A workflow file in the fork (for example `.github/workflows/patched-release.yml`
-on a branch that doesn't come from upstream) could:
-1. Run daily. Compare the newest upstream `v4.*` tag with the newest
-   `release/*-patched` branch.
-2. If there's a newer tag, create the branch and cherry-pick the fix. If the
-   cherry-pick conflicts, open an issue and stop (a human resolves it with
-   section 5.2).
-3. Run the checks from section 6.
-4. Build `web/Dockerfile` and push it to GHCR as
-   `ghcr.io/stepanogil/langfuse-web:<version>-patched`.
-
-That would cut the VM's job down to changing the tag and running `pull`/`up`,
-with no local build. The cost is one more file to maintain, plus a GHCR login on
-the VM. It isn't set up yet.
-
-## 10. Quick reference
+## 8. Quick reference
 
 ```bash
 git fetch origin --tags
 NEW=vX.Y.Z; PREV=release/vA.B.C-patched; FIX=$(git rev-parse "$PREV")
 git switch -c "release/${NEW}-patched" "$NEW" && git cherry-pick "$FIX"
-# resolve conflicts if any (5.2), then:
+# resolve conflicts if any (4.2), then:
 git rev-list --count "$NEW..HEAD"   # 1
 pnpm install --frozen-lockfile && pnpm --filter=shared run db:generate && pnpm --filter=shared run build
-pnpm --filter web run test getServerAuthSession-session-revocation && pnpm --filter web run typecheck && pnpm --filter web run lint
+pnpm --filter web run test getServerAuthSession-session-revocation
 git push -u fork "release/${NEW}-patched"
-# then deploy with docs/deploy-patched-web-image.md
+gh workflow run build-web.yml -R stepanogil/langfuse-web-build -f version="${NEW#v}"
+# then: record the image (6.4) and deploy with docs/deploy-patched-web-image.md
 ```
